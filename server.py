@@ -1,33 +1,29 @@
 """
 Robot Delivery Platform — relay server
 =======================================
-Три роли клиентов подключаются на один WebSocket-эндпоинт /ws
-и представляются первым сообщением {"type":"hello","role":"..."}:
+ESP32 сюда больше НЕ подключается — телефон-мозг общается с ней напрямую
+по локальному Wi-Fi (телефон сам раздаёт точку доступа). Этот сервер нужен
+только для связи оператор (клиент, далеко от робота) <-> телефон-мозг
+(видео, GPS, статус, маршрут) через интернет.
 
-  operator  — браузер оператора: карта, выставление точек маршрута,
-              просмотр видео с телефона, гимбал (pan/tilt/roll), ручное управление.
-  phone     — телефон, закреплённый на роботе: шлёт GPS + компас (heading) + видео.
-  robot     — ESP32: получает маршрут и GPS/heading телефона, едет, объезжает
-              препятствия, шлёт статус/показания датчиков обратно.
-
-Сервер только ретранслирует и хранит последнее состояние, чтобы новый
-клиент сразу получил актуальную картину при подключении.
+  operator — браузер оператора: карта, выставление точек маршрута,
+              просмотр видео с телефона, статус робота.
+  phone    — телефон, закреплённый на роботе: шлёт GPS + компас (heading) + видео,
+             сам же локально управляет ESP32 (без Render).
 """
 import json
-import time
 from flask import Flask, render_template
 from flask_sock import Sock
 
 app = Flask(__name__)
 sock = Sock(app)
 
-clients = {"operator": set(), "phone": set(), "robot": set()}
+clients = {"operator": set(), "phone": set()}
 
 state = {
     "waypoints": [],        # [{"lat":.., "lng":..}, ...]
-    "phone_gps": None,      # {"lat","lng","heading","acc","ts"}
-    "robot_status": None,   # последний {"type":"robot_status", ...} от ESP32
-    "gimbal": {"pan": 90, "tilt": 90, "roll": 90},
+    "phone_gps": None,      # {"lat","lng","heading","acc"}
+    "robot_status": None,   # последний статус от ESP32, пересланный телефоном
 }
 
 
@@ -75,9 +71,6 @@ def ws_endpoint(ws):
                     role = None
                     continue
                 clients[role].add(ws)
-                if role == "robot":
-                    ws.send(json.dumps({"type": "waypoints", "points": state["waypoints"]}))
-                    ws.send(json.dumps({"type": "gimbal", **state["gimbal"]}))
                 if role == "operator":
                     if state["robot_status"]:
                         ws.send(json.dumps(state["robot_status"]))
@@ -86,51 +79,31 @@ def ws_endpoint(ws):
                 continue
 
             if role is None:
-                continue  # игнорируем всё до hello
+                continue
 
-            # ---- Оператор -> Робот + Телефон (мозг теперь в телефоне) ----
+            # ---- Оператор -> Телефон ----
             if mtype == "set_waypoints" and role == "operator":
                 state["waypoints"] = msg.get("points", [])
-                broadcast("robot", {"type": "waypoints", "points": state["waypoints"]})
                 broadcast("phone", {"type": "waypoints", "points": state["waypoints"]})
 
             elif mtype == "nav_control" and role == "operator":
-                # ESP32 включает/выключает применение phone_drive,
-                # телефон включает/выключает свой цикл навигации
-                broadcast("robot", {"type": "nav_control", "cmd": msg.get("cmd")})
                 broadcast("phone", {"type": "nav_control", "cmd": msg.get("cmd")})
 
             elif mtype == "gimbal" and role == "operator":
-                g = state["gimbal"]
-                state["gimbal"] = {
-                    "pan": msg.get("pan", g["pan"]),
-                    "tilt": msg.get("tilt", g["tilt"]),
-                    "roll": msg.get("roll", g["roll"]),
-                }
-                broadcast("robot", {"type": "gimbal", **state["gimbal"]})
+                broadcast("phone", {"type": "gimbal", **{k: v for k, v in msg.items() if k != "type"}})
 
-            elif mtype == "manual_drive" and role == "operator":
-                broadcast("robot", msg)
-
-            # ---- Телефон -> Робот + Оператор ----
+            # ---- Телефон -> Оператор ----
             elif mtype == "phone_gps" and role == "phone":
                 state["phone_gps"] = {
                     "lat": msg["lat"], "lng": msg["lng"],
                     "heading": msg.get("heading"), "acc": msg.get("acc"),
-                    "ts": time.time(),
                 }
-                broadcast("robot", {"type": "phone_gps", **state["phone_gps"]})
                 broadcast("operator", {"type": "phone_gps", **state["phone_gps"]})
 
             elif mtype == "video_frame" and role == "phone":
                 broadcast("operator", msg)
 
-            # ---- Телефон (мозг) -> Робот: команды на моторы ----
-            elif mtype == "phone_drive" and role == "phone":
-                broadcast("robot", msg)
-
-            # ---- Робот -> Оператор ----
-            elif mtype in ("robot_status", "nav_progress", "nav_done", "sensors") and role == "robot":
+            elif mtype in ("robot_status", "nav_progress", "nav_done", "sensors") and role == "phone":
                 if mtype == "robot_status":
                     state["robot_status"] = msg
                 broadcast("operator", msg)
