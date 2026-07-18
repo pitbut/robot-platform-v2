@@ -1,5 +1,0 @@
-flask
-flask-sock
-simple-websocket
-gunicorn
-gevent
