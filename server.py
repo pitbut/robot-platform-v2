@@ -31,7 +31,9 @@ clients = {"operator": set(), "phone": set()}
 
 state = {
     "waypoints": [],        # [{"lat":.., "lng":..}, ...] — подтверждённый маршрут
+    "milestones": [],       # [{"index","address","lat","lng"}, ...] — адреса точек оператора
     "pending_route": None,  # маршрут, ещё не подтверждённый оператором
+    "pending_milestones": [],
     "phone_gps": None,      # {"lat","lng","heading","acc"}
     "robot_status": None,   # последний статус от ESP32, пересланный телефоном
 }
@@ -41,6 +43,19 @@ state = {
 # его в коде, чтобы не светился в публичном GitHub-репозитории.
 ORS_API_KEY = os.environ.get("ORS_API_KEY", "")
 ORS_URL = "https://api.openrouteservice.org/v2/directions/foot-walking/geojson"
+ORS_GEOCODE_URL = "https://api.openrouteservice.org/geocode/reverse"
+
+
+def nearest_route_index(route_points, target_lat, target_lng):
+    """Индекс точки маршрута, ближайшей к (target_lat, target_lng) — чтобы знать,
+    на каком шаге детального маршрута находится каждая исходная точка оператора."""
+    best_i, best_d = 0, float("inf")
+    for i, p in enumerate(route_points):
+        d = (p["lat"] - target_lat) ** 2 + (p["lng"] - target_lng) ** 2
+        if d < best_d:
+            best_d = d
+            best_i = i
+    return best_i
 
 
 def get_walking_route(coords):
@@ -64,6 +79,30 @@ def get_walking_route(coords):
     except Exception as e:
         print("ORS error (exception):", repr(e))
         return None, None, None
+
+
+def reverse_geocode(lat, lng):
+    """Координаты -> человекочитаемый адрес поблизости, или None если не удалось."""
+    if not ORS_API_KEY:
+        return None
+    try:
+        resp = requests.get(ORS_GEOCODE_URL, params={
+            "api_key": ORS_API_KEY,
+            "point.lon": lng,
+            "point.lat": lat,
+            "size": 1,
+        }, timeout=8)
+        if not resp.ok:
+            print(f"Geocode error: HTTP {resp.status_code} — {resp.text[:300]}")
+            return None
+        data = resp.json()
+        features = data.get("features", [])
+        if not features:
+            return None
+        return features[0]["properties"].get("label")
+    except Exception as e:
+        print("Geocode error (exception):", repr(e))
+        return None
 
 
 def broadcast(role, payload, exclude=None):
@@ -120,6 +159,17 @@ def ws_endpoint(ws):
             if role is None:
                 continue
 
+            # ---- Координаты -> адрес (общее для оператора и телефона, отвечаем только спросившему) ----
+            if mtype == "reverse_geocode_request":
+                lat = msg.get("lat")
+                lng = msg.get("lng")
+                address = reverse_geocode(lat, lng) if lat is not None and lng is not None else None
+                reply = {"type": "reverse_geocode_result", "lat": lat, "lng": lng, "address": address}
+                if "index" in msg:
+                    reply["index"] = msg["index"]
+                ws.send(json.dumps(reply))
+                continue
+
             # ---- Оператор -> Построение маршрута (превью, ещё не едем) ----
             if mtype == "set_waypoints" and role == "operator":
                 dest_points = msg.get("points", [])
@@ -146,19 +196,33 @@ def ws_endpoint(ws):
                     error_msg = "Не удалось построить маршрут по тротуарам (см. логи сервера на Render) — показан путь по прямой."
 
                 state["pending_route"] = route_points
+
+                milestones = []
+                for p in dest_points:
+                    addr = reverse_geocode(p["lat"], p["lng"]) or f"{p['lat']:.5f}, {p['lng']:.5f}"
+                    idx = nearest_route_index(route_points, p["lat"], p["lng"])
+                    milestones.append({"index": idx, "address": addr, "lat": p["lat"], "lng": p["lng"]})
+                state["pending_milestones"] = milestones
+
                 broadcast("operator", {
                     "type": "route_preview",
                     "points": route_points,
                     "distance_m": distance_m,
                     "duration_s": duration_s,
                     "error": error_msg,
+                    "milestones": milestones,
                 })
 
             elif mtype == "confirm_route" and role == "operator":
                 if state["pending_route"]:
                     state["waypoints"] = state["pending_route"]
+                    state["milestones"] = state.get("pending_milestones", [])
                     state["pending_route"] = None
-                    broadcast("phone", {"type": "waypoints", "points": state["waypoints"]})
+                    broadcast("phone", {
+                        "type": "waypoints",
+                        "points": state["waypoints"],
+                        "milestones": state["milestones"],
+                    })
                     broadcast("operator", {"type": "route_confirmed"})
 
             elif mtype == "nav_control" and role == "operator":
