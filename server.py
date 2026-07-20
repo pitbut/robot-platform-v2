@@ -142,137 +142,147 @@ def ws_endpoint(ws):
             except ValueError:
                 continue
 
-            mtype = msg.get("type")
-
-            if mtype == "hello":
-                role = msg.get("role")
-                if role not in clients:
-                    role = None
-                    continue
-                clients[role].add(ws)
-                if role == "operator":
-                    if state["robot_status"]:
-                        ws.send(json.dumps(state["robot_status"]))
-                    if state["phone_gps"]:
-                        ws.send(json.dumps({"type": "phone_gps", **state["phone_gps"]}))
-                    if state["waypoints"]:
-                        ws.send(json.dumps({
-                            "type": "route_restore",
-                            "points": state["waypoints"],
-                            "milestones": state["milestones"],
-                            "nav_running": state["nav_running"],
-                        }))
+            try:
+                role = handle_message(ws, role, msg)
+            except Exception as e:
+                # Не даём одному кривому сообщению убить всё соединение (и вместе с ним
+                # видео/маршрут у оператора) — просто логируем и едем дальше.
+                print(f"ws_endpoint error (role={role}): {repr(e)}")
                 continue
-
-            if role is None:
-                continue
-
-            # ---- Координаты -> адрес (общее для оператора и телефона, отвечаем только спросившему) ----
-            if mtype == "reverse_geocode_request":
-                lat = msg.get("lat")
-                lng = msg.get("lng")
-                address = reverse_geocode(lat, lng) if lat is not None and lng is not None else None
-                reply = {"type": "reverse_geocode_result", "lat": lat, "lng": lng, "address": address}
-                if "index" in msg:
-                    reply["index"] = msg["index"]
-                ws.send(json.dumps(reply))
-                continue
-
-            # ---- Оператор -> Построение маршрута (превью, ещё не едем) ----
-            if mtype == "set_waypoints" and role == "operator":
-                dest_points = msg.get("points", [])
-                if not state["phone_gps"]:
-                    ws.send(json.dumps({
-                        "type": "route_preview",
-                        "points": dest_points,
-                        "distance_m": None,
-                        "duration_s": None,
-                        "error": "Нет GPS телефона — сначала дождись, пока телефон выйдет на связь.",
-                    }))
-                    continue
-
-                start = (state["phone_gps"]["lat"], state["phone_gps"]["lng"])
-                coords = [start] + [(p["lat"], p["lng"]) for p in dest_points]
-                route_points, distance_m, duration_s = get_walking_route(coords)
-
-                error_msg = None
-                if route_points is None:
-                    # ORS недоступен/не настроен ключ — едем по прямой линии между точками,
-                    # как раньше, но явно предупреждаем оператора (в ТОМ ЖЕ сообщении,
-                    # чтобы предупреждение не затёрлось следующим broadcast'ом).
-                    route_points = dest_points
-                    error_msg = "Не удалось построить маршрут по тротуарам (см. логи сервера на Render) — показан путь по прямой."
-
-                state["pending_route"] = route_points
-
-                milestones = []
-                for p in dest_points:
-                    addr = reverse_geocode(p["lat"], p["lng"]) or f"{p['lat']:.5f}, {p['lng']:.5f}"
-                    idx = nearest_route_index(route_points, p["lat"], p["lng"])
-                    milestones.append({"index": idx, "address": addr, "lat": p["lat"], "lng": p["lng"]})
-                state["pending_milestones"] = milestones
-
-                broadcast("operator", {
-                    "type": "route_preview",
-                    "points": route_points,
-                    "distance_m": distance_m,
-                    "duration_s": duration_s,
-                    "error": error_msg,
-                    "milestones": milestones,
-                })
-
-            elif mtype == "confirm_route" and role == "operator":
-                if state["pending_route"]:
-                    state["waypoints"] = state["pending_route"]
-                    state["milestones"] = state.get("pending_milestones", [])
-                    state["pending_route"] = None
-                    broadcast("phone", {
-                        "type": "waypoints",
-                        "points": state["waypoints"],
-                        "milestones": state["milestones"],
-                    })
-                    broadcast("operator", {"type": "route_confirmed"})
-
-            elif mtype == "nav_control" and role == "operator":
-                state["nav_running"] = msg.get("cmd") == "start"
-                broadcast("phone", {"type": "nav_control", "cmd": msg.get("cmd")})
-
-            elif mtype == "gimbal" and role == "operator":
-                broadcast("phone", {"type": "gimbal", **{k: v for k, v in msg.items() if k != "type"}})
-
-            elif mtype == "listen_control" and role == "operator":
-                broadcast("phone", {"type": "listen_control", "enabled": msg.get("enabled", False)})
-
-            elif mtype == "talk_control" and role == "operator":
-                broadcast("phone", {"type": "talk_control", "enabled": msg.get("enabled", False)})
-
-            elif mtype == "operator_audio_chunk" and role == "operator":
-                broadcast("phone", msg)
-
-            # ---- Телефон -> Оператор ----
-            elif mtype == "phone_gps" and role == "phone":
-                state["phone_gps"] = {
-                    "lat": msg["lat"], "lng": msg["lng"],
-                    "heading": msg.get("heading"), "acc": msg.get("acc"),
-                }
-                broadcast("operator", {"type": "phone_gps", **state["phone_gps"]})
-
-            elif mtype == "video_frame" and role == "phone":
-                broadcast("operator", msg)
-
-            elif mtype == "audio_frame" and role == "phone":
-                broadcast("operator", msg)
-
-            elif mtype in ("robot_status", "nav_progress", "nav_done", "sensors") and role == "phone":
-                if mtype == "robot_status":
-                    state["robot_status"] = msg
-                if mtype == "nav_done":
-                    state["nav_running"] = False
-                broadcast("operator", msg)
-
     finally:
         if role:
             clients[role].discard(ws)
+
+
+def handle_message(ws, role, msg):
+    mtype = msg.get("type")
+
+    if mtype == "hello":
+        role = msg.get("role")
+        if role not in clients:
+            return None
+        clients[role].add(ws)
+        if role == "operator":
+            if state["robot_status"]:
+                ws.send(json.dumps(state["robot_status"]))
+            if state["phone_gps"]:
+                ws.send(json.dumps({"type": "phone_gps", **state["phone_gps"]}))
+            if state["waypoints"]:
+                ws.send(json.dumps({
+                    "type": "route_restore",
+                    "points": state["waypoints"],
+                    "milestones": state["milestones"],
+                    "nav_running": state["nav_running"],
+                }))
+        return role
+
+    if role is None:
+        return role
+
+    # ---- Координаты -> адрес (общее для оператора и телефона, отвечаем только спросившему) ----
+    if mtype == "reverse_geocode_request":
+        lat = msg.get("lat")
+        lng = msg.get("lng")
+        address = reverse_geocode(lat, lng) if lat is not None and lng is not None else None
+        reply = {"type": "reverse_geocode_result", "lat": lat, "lng": lng, "address": address}
+        if "index" in msg:
+            reply["index"] = msg["index"]
+        ws.send(json.dumps(reply))
+        return role
+
+    # ---- Оператор -> Построение маршрута (превью, ещё не едем) ----
+    if mtype == "set_waypoints" and role == "operator":
+        dest_points = msg.get("points", [])
+        if not state["phone_gps"]:
+            ws.send(json.dumps({
+                "type": "route_preview",
+                "points": dest_points,
+                "distance_m": None,
+                "duration_s": None,
+                "error": "Нет GPS телефона — сначала дождись, пока телефон выйдет на связь.",
+            }))
+            return role
+
+        start = (state["phone_gps"]["lat"], state["phone_gps"]["lng"])
+        coords = [start] + [(p["lat"], p["lng"]) for p in dest_points]
+        route_points, distance_m, duration_s = get_walking_route(coords)
+
+        error_msg = None
+        if route_points is None:
+            # ORS недоступен/не настроен ключ — едем по прямой линии между точками,
+            # как раньше, но явно предупреждаем оператора (в ТОМ ЖЕ сообщении,
+            # чтобы предупреждение не затёрлось следующим broadcast'ом).
+            route_points = dest_points
+            error_msg = "Не удалось построить маршрут по тротуарам (см. логи сервера на Render) — показан путь по прямой."
+
+        state["pending_route"] = route_points
+
+        milestones = []
+        for p in dest_points:
+            addr = reverse_geocode(p["lat"], p["lng"]) or f"{p['lat']:.5f}, {p['lng']:.5f}"
+            idx = nearest_route_index(route_points, p["lat"], p["lng"])
+            milestones.append({"index": idx, "address": addr, "lat": p["lat"], "lng": p["lng"]})
+        state["pending_milestones"] = milestones
+
+        broadcast("operator", {
+            "type": "route_preview",
+            "points": route_points,
+            "distance_m": distance_m,
+            "duration_s": duration_s,
+            "error": error_msg,
+            "milestones": milestones,
+        })
+
+    elif mtype == "confirm_route" and role == "operator":
+        if state["pending_route"]:
+            state["waypoints"] = state["pending_route"]
+            state["milestones"] = state.get("pending_milestones", [])
+            state["pending_route"] = None
+            broadcast("phone", {
+                "type": "waypoints",
+                "points": state["waypoints"],
+                "milestones": state["milestones"],
+            })
+            broadcast("operator", {"type": "route_confirmed"})
+
+    elif mtype == "nav_control" and role == "operator":
+        state["nav_running"] = msg.get("cmd") == "start"
+        broadcast("phone", {"type": "nav_control", "cmd": msg.get("cmd")})
+
+    elif mtype == "gimbal" and role == "operator":
+        broadcast("phone", {"type": "gimbal", **{k: v for k, v in msg.items() if k != "type"}})
+
+    elif mtype == "listen_control" and role == "operator":
+        broadcast("phone", {"type": "listen_control", "enabled": msg.get("enabled", False)})
+
+    elif mtype == "talk_control" and role == "operator":
+        broadcast("phone", {"type": "talk_control", "enabled": msg.get("enabled", False)})
+
+    elif mtype == "operator_audio_chunk" and role == "operator":
+        broadcast("phone", msg)
+
+    # ---- Телефон -> Оператор ----
+    elif mtype == "phone_gps" and role == "phone":
+        state["phone_gps"] = {
+            "lat": msg["lat"], "lng": msg["lng"],
+            "heading": msg.get("heading"), "acc": msg.get("acc"),
+        }
+        broadcast("operator", {"type": "phone_gps", **state["phone_gps"]})
+
+    elif mtype == "video_frame" and role == "phone":
+        broadcast("operator", msg)
+
+    elif mtype == "audio_frame" and role == "phone":
+        broadcast("operator", msg)
+
+    elif mtype in ("robot_status", "nav_progress", "nav_done", "sensors") and role == "phone":
+        if mtype == "robot_status":
+            state["robot_status"] = msg
+        if mtype == "nav_done":
+            state["nav_running"] = False
+        broadcast("operator", msg)
+
+    return role
 
 
 if __name__ == "__main__":
