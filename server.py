@@ -45,7 +45,9 @@ def get_walking_route(coords):
     headers = {"Authorization": ORS_API_KEY, "Content-Type": "application/json"}
     try:
         resp = requests.post(ORS_URL, json=body, headers=headers, timeout=10)
-        resp.raise_for_status()
+        if not resp.ok:
+            print(f"ORS error: HTTP {resp.status_code} — {resp.text[:500]}")
+            return None, None, None
         data = resp.json()
         feature = data["features"][0]
         geometry = feature["geometry"]["coordinates"]  # [[lng,lat], ...]
@@ -53,7 +55,7 @@ def get_walking_route(coords):
         points = [{"lat": lat, "lng": lng} for lng, lat in geometry]
         return points, summary.get("distance"), summary.get("duration")
     except Exception as e:
-        print("ORS error:", e)
+        print("ORS error (exception):", repr(e))
         return None, None, None
 
 
@@ -116,8 +118,11 @@ def ws_endpoint(ws):
                 dest_points = msg.get("points", [])
                 if not state["phone_gps"]:
                     ws.send(json.dumps({
-                        "type": "route_error",
-                        "message": "Нет GPS телефона — сначала дождись, пока телефон выйдет на связь.",
+                        "type": "route_preview",
+                        "points": dest_points,
+                        "distance_m": None,
+                        "duration_s": None,
+                        "error": "Нет GPS телефона — сначала дождись, пока телефон выйдет на связь.",
                     }))
                     continue
 
@@ -125,14 +130,13 @@ def ws_endpoint(ws):
                 coords = [start] + [(p["lat"], p["lng"]) for p in dest_points]
                 route_points, distance_m, duration_s = get_walking_route(coords)
 
+                error_msg = None
                 if route_points is None:
                     # ORS недоступен/не настроен ключ — едем по прямой линии между точками,
-                    # как раньше, но явно предупреждаем оператора.
+                    # как раньше, но явно предупреждаем оператора (в ТОМ ЖЕ сообщении,
+                    # чтобы предупреждение не затёрлось следующим broadcast'ом).
                     route_points = dest_points
-                    ws.send(json.dumps({
-                        "type": "route_error",
-                        "message": "Не удалось построить маршрут по тротуарам (проверь ORS_API_KEY на сервере) — показан путь по прямой.",
-                    }))
+                    error_msg = "Не удалось построить маршрут по тротуарам (см. логи сервера на Render) — показан путь по прямой."
 
                 state["pending_route"] = route_points
                 broadcast("operator", {
@@ -140,6 +144,7 @@ def ws_endpoint(ws):
                     "points": route_points,
                     "distance_m": distance_m,
                     "duration_s": duration_s,
+                    "error": error_msg,
                 })
 
             elif mtype == "confirm_route" and role == "operator":
