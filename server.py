@@ -252,6 +252,9 @@ def handle_message(ws, role, msg):
     elif mtype == "gimbal" and role == "operator":
         broadcast("phone", {"type": "gimbal", **{k: v for k, v in msg.items() if k != "type"}})
 
+    elif mtype == "manual_drive" and role == "operator":
+        broadcast("phone", msg)
+
     elif mtype == "listen_control" and role == "operator":
         broadcast("phone", {"type": "listen_control", "enabled": msg.get("enabled", False)})
 
