@@ -36,6 +36,7 @@ state = {
     "pending_milestones": [],
     "phone_gps": None,      # {"lat","lng","heading","acc"}
     "robot_status": None,   # последний статус от ESP32, пересланный телефоном
+    "nav_running": False,   # едет ли робот сейчас — чтобы восстановить при обновлении страницы
 }
 
 # Ключ бери на openrouteservice.org (Dashboard -> API Key) и задавай через
@@ -154,6 +155,13 @@ def ws_endpoint(ws):
                         ws.send(json.dumps(state["robot_status"]))
                     if state["phone_gps"]:
                         ws.send(json.dumps({"type": "phone_gps", **state["phone_gps"]}))
+                    if state["waypoints"]:
+                        ws.send(json.dumps({
+                            "type": "route_restore",
+                            "points": state["waypoints"],
+                            "milestones": state["milestones"],
+                            "nav_running": state["nav_running"],
+                        }))
                 continue
 
             if role is None:
@@ -226,6 +234,7 @@ def ws_endpoint(ws):
                     broadcast("operator", {"type": "route_confirmed"})
 
             elif mtype == "nav_control" and role == "operator":
+                state["nav_running"] = msg.get("cmd") == "start"
                 broadcast("phone", {"type": "nav_control", "cmd": msg.get("cmd")})
 
             elif mtype == "gimbal" and role == "operator":
@@ -257,6 +266,8 @@ def ws_endpoint(ws):
             elif mtype in ("robot_status", "nav_progress", "nav_done", "sensors") and role == "phone":
                 if mtype == "robot_status":
                     state["robot_status"] = msg
+                if mtype == "nav_done":
+                    state["nav_running"] = False
                 broadcast("operator", msg)
 
     finally:
