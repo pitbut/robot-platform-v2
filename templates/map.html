@@ -42,8 +42,12 @@
       <p style="font-size:12px;color:#999;margin:0 0 8px">Кликай по карте — точки добавятся по порядку.</p>
       <div id="wpList"></div>
       <div class="row">
-        <button onclick="sendRoute()">Отправить маршрут</button>
+        <button onclick="sendRoute()">Построить маршрут</button>
         <button class="ghost" onclick="clearRoute()">Очистить</button>
+      </div>
+      <div id="routeInfo" style="font-size:13px;color:#8ecbff;margin:8px 0;"></div>
+      <div class="row">
+        <button id="confirmBtn" style="display:none;background:#2fa84f" onclick="confirmRoute()">Подтвердить и поехать</button>
       </div>
       <div class="row">
         <button onclick="navControl('start')">Старт</button>
@@ -86,14 +90,24 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 20 
 
 let waypoints = [];
 let wpMarkers = [];
+let routeLine = null;
+let previewLine = null;
 let robotMarker = null;
 let phoneMarker = null;
+
+function redrawRouteLine() {
+  if (routeLine) map.removeLayer(routeLine);
+  if (waypoints.length > 1) {
+    routeLine = L.polyline(waypoints.map(p => [p.lat, p.lng]), { color: '#2d6cdf', weight: 4, dashArray: '8,6' }).addTo(map);
+  }
+}
 
 map.on('click', e => {
   waypoints.push({ lat: e.latlng.lat, lng: e.latlng.lng });
   const m = L.marker(e.latlng).addTo(map);
   wpMarkers.push(m);
   renderWpList();
+  redrawRouteLine();
 });
 
 function renderWpList() {
@@ -106,11 +120,23 @@ function clearRoute() {
   waypoints = [];
   wpMarkers.forEach(m => map.removeLayer(m));
   wpMarkers = [];
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  if (previewLine) { map.removeLayer(previewLine); previewLine = null; }
+  document.getElementById('routeInfo').textContent = '';
+  document.getElementById('confirmBtn').style.display = 'none';
   renderWpList();
 }
 
 function sendRoute() {
+  if (previewLine) { map.removeLayer(previewLine); previewLine = null; }
+  document.getElementById('confirmBtn').style.display = 'none';
+  document.getElementById('routeInfo').textContent = 'Строю маршрут по тротуарам...';
   ws.send(JSON.stringify({ type: 'set_waypoints', points: waypoints }));
+}
+
+function confirmRoute() {
+  ws.send(JSON.stringify({ type: 'confirm_route' }));
+  document.getElementById('confirmBtn').style.display = 'none';
 }
 
 function navControl(cmd) {
@@ -149,6 +175,24 @@ ws.onmessage = (ev) => {
     } else {
       phoneMarker.setLatLng(ll);
     }
+  }
+
+  if (msg.type === 'route_preview') {
+    if (previewLine) map.removeLayer(previewLine);
+    previewLine = L.polyline(msg.points.map(p => [p.lat, p.lng]), { color: '#2fa84f', weight: 5 }).addTo(map);
+    map.fitBounds(previewLine.getBounds(), { padding: [30, 30] });
+    const distKm = msg.distance_m != null ? (msg.distance_m / 1000).toFixed(2) + ' км' : '?';
+    const durMin = msg.duration_s != null ? Math.round(msg.duration_s / 60) + ' мин' : '?';
+    document.getElementById('routeInfo').textContent = `Маршрут: ${distKm}, ~${durMin} пешком. Проверь и подтверди.`;
+    document.getElementById('confirmBtn').style.display = 'inline-block';
+  }
+
+  if (msg.type === 'route_error') {
+    document.getElementById('routeInfo').textContent = '⚠ ' + msg.message;
+  }
+
+  if (msg.type === 'route_confirmed') {
+    document.getElementById('routeInfo').textContent = 'Маршрут подтверждён — можно жать "Старт".';
   }
 
   if (msg.type === 'robot_status' || msg.type === 'nav_progress' || msg.type === 'sensors') {
