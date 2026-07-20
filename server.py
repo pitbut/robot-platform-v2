@@ -167,6 +167,15 @@ def ws_endpoint(ws):
             elif mtype == "gimbal" and role == "operator":
                 broadcast("phone", {"type": "gimbal", **{k: v for k, v in msg.items() if k != "type"}})
 
+            elif mtype == "listen_control" and role == "operator":
+                broadcast("phone", {"type": "listen_control", "enabled": msg.get("enabled", False)})
+
+            elif mtype == "talk_control" and role == "operator":
+                broadcast("phone", {"type": "talk_control", "enabled": msg.get("enabled", False)})
+
+            elif mtype == "operator_audio_chunk" and role == "operator":
+                broadcast("phone", msg)
+
             # ---- Телефон -> Оператор ----
             elif mtype == "phone_gps" and role == "phone":
                 state["phone_gps"] = {
@@ -176,6 +185,9 @@ def ws_endpoint(ws):
                 broadcast("operator", {"type": "phone_gps", **state["phone_gps"]})
 
             elif mtype == "video_frame" and role == "phone":
+                broadcast("operator", msg)
+
+            elif mtype == "audio_frame" and role == "phone":
                 broadcast("operator", msg)
 
             elif mtype in ("robot_status", "nav_progress", "nav_done", "sensors") and role == "phone":
