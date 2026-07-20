@@ -78,6 +78,16 @@
     </div>
 
     <div class="card">
+      <h2>Голосовая связь</h2>
+      <p style="font-size:12px;color:#999;margin:0 0 8px">Оба выключены по умолчанию — экономят трафик, пока не нужны.</p>
+      <div class="row">
+        <button id="listenBtn" onclick="toggleListen()">🔊 Слушать: выкл</button>
+        <button id="talkBtn" onclick="toggleTalk()">🎤 Говорить: выкл</button>
+      </div>
+      <div id="talkStatus" style="font-size:12px;color:#999;margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
       <h2>Статус робота</h2>
       <div id="status">нет данных</div>
     </div>
@@ -156,6 +166,108 @@ function sendGimbal() {
   }));
 }
 
+// ───────────────────────── Голосовая связь ─────────────────────────
+let audioCtx = null;
+let nextAudioStart = 0;
+
+function ensureAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+document.addEventListener('click', () => { ensureAudioCtx(); }, { once: true });
+
+// Входящий звук с телефона — сырые PCM16 моно чанки, планируем их подряд без пауз/наложений.
+function playPcmChunk(base64Data, sampleRate) {
+  const ctx = ensureAudioCtx();
+  const raw = atob(base64Data);
+  const len = raw.length / 2;
+  if (len <= 0) return;
+  const float32 = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    const lo = raw.charCodeAt(i * 2);
+    const hi = raw.charCodeAt(i * 2 + 1);
+    let val = (hi << 8) | lo;
+    if (val >= 0x8000) val -= 0x10000;
+    float32[i] = val / 32768;
+  }
+  const buffer = ctx.createBuffer(1, len, sampleRate);
+  buffer.copyToChannel(float32, 0);
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ctx.destination);
+
+  const now = ctx.currentTime;
+  const startAt = Math.max(now, nextAudioStart);
+  source.start(startAt);
+  nextAudioStart = startAt + buffer.duration;
+}
+
+// Исходящий звук (говорить) — живой поток сырых PCM-чанков через Web Audio API,
+// никакой записи и ожидания: чанк снят с микрофона -> сразу ушёл по сети.
+let listening = false;
+let talking = false;
+let talkCtx = null, talkStream = null, talkSource = null, talkProcessor = null;
+
+function toggleListen() {
+  listening = !listening;
+  ws.send(JSON.stringify({ type: 'listen_control', enabled: listening }));
+  document.getElementById('listenBtn').textContent = listening ? '🔊 Слушать: вкл' : '🔊 Слушать: выкл';
+}
+
+function toggleTalk() {
+  talking = !talking;
+  if (talking) {
+    startTalkStream();
+  } else {
+    stopTalkStream();
+    ws.send(JSON.stringify({ type: 'talk_control', enabled: false })); // робот должен замолчать сразу
+  }
+  document.getElementById('talkBtn').textContent = talking ? '🎤 Говорить: вкл' : '🎤 Говорить: выкл';
+}
+
+async function startTalkStream() {
+  try {
+    talkStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    talkCtx = new (window.AudioContext || window.webkitAudioContext)();
+    talkSource = talkCtx.createMediaStreamSource(talkStream);
+    talkProcessor = talkCtx.createScriptProcessor(4096, 1, 1);
+    talkProcessor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      const pcm16 = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      const bytes = new Uint8Array(pcm16.buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      ws.send(JSON.stringify({
+        type: 'operator_audio_chunk',
+        data: btoa(binary),
+        sampleRate: talkCtx.sampleRate,
+      }));
+    };
+    talkSource.connect(talkProcessor);
+    talkProcessor.connect(talkCtx.destination);
+    ws.send(JSON.stringify({ type: 'talk_control', enabled: true }));
+    document.getElementById('talkStatus').textContent = 'В эфире...';
+  } catch (e) {
+    document.getElementById('talkStatus').textContent = 'Нет доступа к микрофону: ' + e.message;
+    talking = false;
+    document.getElementById('talkBtn').textContent = '🎤 Говорить: выкл';
+  }
+}
+
+function stopTalkStream() {
+  if (talkProcessor) { talkProcessor.disconnect(); talkProcessor.onaudioprocess = null; talkProcessor = null; }
+  if (talkSource) { talkSource.disconnect(); talkSource = null; }
+  if (talkStream) { talkStream.getTracks().forEach((t) => t.stop()); talkStream = null; }
+  if (talkCtx) { talkCtx.close(); talkCtx = null; }
+  document.getElementById('talkStatus').textContent = '';
+}
+
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 const ws = new WebSocket(`${proto}://${location.host}/ws`);
 
@@ -166,6 +278,10 @@ ws.onmessage = (ev) => {
 
   if (msg.type === 'video_frame') {
     document.getElementById('video').src = 'data:image/jpeg;base64,' + msg.data;
+  }
+
+  if (msg.type === 'audio_frame') {
+    playPcmChunk(msg.data, msg.sampleRate || 16000);
   }
 
   if (msg.type === 'phone_gps') {
