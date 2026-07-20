@@ -297,6 +297,22 @@ ws.onmessage = (ev) => {
     renderWpList();
   }
 
+  if (msg.type === 'route_restore') {
+    // Сервер помнит подтверждённый маршрут даже после обновления страницы —
+    // просто перерисовываем его, ничего заново подтверждать не нужно.
+    if (routeLine) map.removeLayer(routeLine);
+    routeLine = L.polyline(msg.points.map(p => [p.lat, p.lng]), { color: '#2fa84f', weight: 5 }).addTo(map);
+    map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
+
+    const el = document.getElementById('routeInfo');
+    let text = 'Восстановлен подтверждённый маршрут.';
+    if (msg.milestones && msg.milestones.length) {
+      text += '\n' + msg.milestones.map((m, i) => `#${i + 1}: ${m.address}`).join('\n');
+    }
+    if (msg.nav_running) text += '\n(робот сейчас едет)';
+    el.textContent = text;
+  }
+
   if (msg.type === 'phone_gps') {
     const ll = [msg.lat, msg.lng];
     if (!phoneMarker) {
