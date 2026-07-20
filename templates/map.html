@@ -181,14 +181,18 @@ ws.onmessage = (ev) => {
     if (previewLine) map.removeLayer(previewLine);
     previewLine = L.polyline(msg.points.map(p => [p.lat, p.lng]), { color: '#2fa84f', weight: 5 }).addTo(map);
     map.fitBounds(previewLine.getBounds(), { padding: [30, 30] });
-    const distKm = msg.distance_m != null ? (msg.distance_m / 1000).toFixed(2) + ' км' : '?';
-    const durMin = msg.duration_s != null ? Math.round(msg.duration_s / 60) + ' мин' : '?';
-    document.getElementById('routeInfo').textContent = `Маршрут: ${distKm}, ~${durMin} пешком. Проверь и подтверди.`;
-    document.getElementById('confirmBtn').style.display = 'inline-block';
-  }
 
-  if (msg.type === 'route_error') {
-    document.getElementById('routeInfo').textContent = '⚠ ' + msg.message;
+    const infoEl = document.getElementById('routeInfo');
+    if (msg.error) {
+      infoEl.innerHTML = '⚠ ' + msg.error;
+      infoEl.style.color = '#e0a030';
+    } else {
+      const distKm = msg.distance_m != null ? (msg.distance_m / 1000).toFixed(2) + ' км' : '?';
+      const durMin = msg.duration_s != null ? Math.round(msg.duration_s / 60) + ' мин' : '?';
+      infoEl.textContent = `Маршрут: ${distKm}, ~${durMin} пешком. Проверь и подтверди.`;
+      infoEl.style.color = '#8ecbff';
+    }
+    document.getElementById('confirmBtn').style.display = 'inline-block';
   }
 
   if (msg.type === 'route_confirmed') {
