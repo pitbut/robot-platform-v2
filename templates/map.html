@@ -66,13 +66,17 @@
       <h2>Ручное управление</h2>
       <div class="dpad">
         <span></span>
-        <button onmousedown="drive('forward')" onmouseup="drive('stop')">▲</button>
+        <button onmousedown="drive('forward')" onmouseup="drive('stop')" onmouseleave="drive('stop')"
+          ontouchstart="drive('forward')" ontouchend="drive('stop')" ontouchcancel="drive('stop')">▲</button>
         <span></span>
-        <button onmousedown="drive('left')" onmouseup="drive('stop')">◀</button>
+        <button onmousedown="drive('left')" onmouseup="drive('stop')" onmouseleave="drive('stop')"
+          ontouchstart="drive('left')" ontouchend="drive('stop')" ontouchcancel="drive('stop')">◀</button>
         <button class="stop" onclick="drive('stop')">■</button>
-        <button onmousedown="drive('right')" onmouseup="drive('stop')">▶</button>
+        <button onmousedown="drive('right')" onmouseup="drive('stop')" onmouseleave="drive('stop')"
+          ontouchstart="drive('right')" ontouchend="drive('stop')" ontouchcancel="drive('stop')">▶</button>
         <span></span>
-        <button onmousedown="drive('back')" onmouseup="drive('stop')">▼</button>
+        <button onmousedown="drive('back')" onmouseup="drive('stop')" onmouseleave="drive('stop')"
+          ontouchstart="drive('back')" ontouchend="drive('stop')" ontouchcancel="drive('stop')">▼</button>
         <span></span>
       </div>
     </div>
