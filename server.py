@@ -47,6 +47,18 @@ ORS_URL = "https://api.openrouteservice.org/v2/directions/foot-walking/geojson"
 ORS_GEOCODE_URL = "https://api.openrouteservice.org/geocode/reverse"
 
 
+import math
+
+
+def gps_dist_m(lat1, lng1, lat2, lng2):
+    r = 6371000.0
+    d_lat = math.radians(lat2 - lat1)
+    d_lng = math.radians(lng2 - lng1)
+    a = (math.sin(d_lat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(d_lng / 2) ** 2)
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 def nearest_route_index(route_points, target_lat, target_lng):
     """Индекс точки маршрута, ближайшей к (target_lat, target_lng) — чтобы знать,
     на каком шаге детального маршрута находится каждая исходная точка оператора."""
@@ -61,25 +73,28 @@ def nearest_route_index(route_points, target_lat, target_lng):
 
 def get_walking_route(coords):
     """coords: список (lat, lng), первая точка — текущее положение робота.
-    Возвращает (points, distance_m, duration_s) или (None, None, None) при ошибке."""
+    Возвращает (points, distance_m, duration_s, way_points) или (None, None, None, None) при ошибке.
+    way_points[i] — индекс в points, куда ORS "прижал" i-ю входную координату
+    (0 — старт/робот, 1..N — твои точки назначения по порядку)."""
     if not ORS_API_KEY:
-        return None, None, None
+        return None, None, None, None
     body = {"coordinates": [[lng, lat] for lat, lng in coords]}
     headers = {"Authorization": ORS_API_KEY, "Content-Type": "application/json"}
     try:
         resp = requests.post(ORS_URL, json=body, headers=headers, timeout=10)
         if not resp.ok:
             print(f"ORS error: HTTP {resp.status_code} — {resp.text[:500]}")
-            return None, None, None
+            return None, None, None, None
         data = resp.json()
         feature = data["features"][0]
         geometry = feature["geometry"]["coordinates"]  # [[lng,lat], ...]
         summary = feature["properties"]["summary"]
+        way_points = feature["properties"].get("way_points", [])
         points = [{"lat": lat, "lng": lng} for lng, lat in geometry]
-        return points, summary.get("distance"), summary.get("duration")
+        return points, summary.get("distance"), summary.get("duration"), way_points
     except Exception as e:
         print("ORS error (exception):", repr(e))
-        return None, None, None
+        return None, None, None, None
 
 
 def reverse_geocode(lat, lng):
@@ -205,7 +220,7 @@ def handle_message(ws, role, msg):
 
         start = (state["phone_gps"]["lat"], state["phone_gps"]["lng"])
         coords = [start] + [(p["lat"], p["lng"]) for p in dest_points]
-        route_points, distance_m, duration_s = get_walking_route(coords)
+        route_points, distance_m, duration_s, way_points = get_walking_route(coords)
 
         error_msg = None
         if route_points is None:
@@ -214,6 +229,24 @@ def handle_message(ws, role, msg):
             # чтобы предупреждение не затёрлось следующим broadcast'ом).
             route_points = dest_points
             error_msg = "Не удалось построить маршрут по тротуарам (см. логи сервера на Render) — показан путь по прямой."
+        elif way_points:
+            # ORS прокладывает маршрут только там, где есть данные о дорожках/тротуарах —
+            # если точка внутри двора/здания, он "прижимает" её к ближайшей известной улице
+            # и на этом останавливается, реальной точки в маршруте может не оказаться вообще.
+            # Досыпаем настоящие координаты кликнутых точек сразу после того места, куда их
+            # прижал ORS — если там реальный разрыв, этот последний отрезок телефон пройдёт
+            # напрямую по GPS (это уже умеет — MIN_BEARING_DIST в навигации на телефоне).
+            insertions = []
+            for i, p in enumerate(dest_points):
+                wp_idx = way_points[i + 1] if i + 1 < len(way_points) else None
+                if wp_idx is None:
+                    continue
+                snapped = route_points[wp_idx]
+                gap_m = gps_dist_m(snapped["lat"], snapped["lng"], p["lat"], p["lng"])
+                if gap_m > 3:  # реальный разрыв, не просто погрешность построения
+                    insertions.append((wp_idx, {"lat": p["lat"], "lng": p["lng"]}))
+            for wp_idx, pt in sorted(insertions, key=lambda x: -x[0]):
+                route_points.insert(wp_idx + 1, pt)
 
         state["pending_route"] = route_points
 
